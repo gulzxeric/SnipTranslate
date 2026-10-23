@@ -312,7 +312,30 @@ def _copy_button_name(name: str) -> bool:
     return False
 
 
-def request_copy(snipper_handle: int) -> None:
+def _icon_copy_buttons(pane, automation, process_id):
+    data = _element_data(pane)
+    l, t, r, b = data.rect
+    if not (data.process_id == process_id and data.handle and data.title == "Snipaste"
+            and data.class_name == "QWidget" and 24 <= b-t <= 120 and r-l > 5*(b-t)):
+        return []
+    row = []
+    for control in _elements(pane, automation, automation.CreateTrueCondition()):
+        # Most descendants are not buttons. Avoid reading all their remote
+        # properties across the UIA process boundary.
+        if str(control.CurrentClassName) != "QPushButton":
+            continue
+        item = _element_data(control)
+        if item.process_id == process_id and _visible(item, control):
+            row.append((item, control))
+    if len(row) >= 8:
+        item, control = max(row, key=lambda pair: pair[0].rect[2])
+        if (0 <= r-item.rect[2] <= 4 and abs(item.rect[1]-t) <= 4
+                and bool(control.CurrentIsEnabled)):
+            return [control]
+    return []
+
+
+def request_copy(snipper_handle: int, toolbar_handle: int = 0) -> None:
     """Invoke only the original verified Snipper's enabled Copy button.
 
     This must run on the same dedicated UIA worker used for probes. The caller
@@ -326,34 +349,27 @@ def request_copy(snipper_handle: int) -> None:
         root = automation.ElementFromHandle(snipper_handle)
         if int(root.CurrentProcessId) != process_id:
             raise NativeSnipasteError("Snipaste 截图窗口已失效，请重新截图。")
-        buttons = automation.CreatePropertyCondition(30003, 50000)  # Button
         matches = []
-        for element in _elements(root, automation, buttons):
-            data = _element_data(element)
-            if (data.process_id == process_id and _copy_button_name(data.title)
-                    and _visible(data, element) and bool(element.CurrentIsEnabled)):
-                matches.append(element)
+        if toolbar_handle:
+            live = _window_data(toolbar_handle)
+            # The native HWND class is Qt...QWindowIcon; UIA reports QWidget.
+            # Validate that UIA structure separately in _icon_copy_buttons.
+            if live and live.process_id == process_id and live.title == 'Snipaste':
+                pane = automation.ElementFromHandle(toolbar_handle)
+                matches = _icon_copy_buttons(pane, automation, process_id)
+        if not matches:
+            buttons = automation.CreatePropertyCondition(30003, 50000)  # Button
+            for element in _elements(root, automation, buttons):
+                data = _element_data(element)
+                if (data.process_id == process_id and _copy_button_name(data.title)
+                        and _visible(data, element) and bool(element.CurrentIsEnabled)):
+                    matches.append(element)
         if not matches:
             # This build's icon-only QPushButtons have empty accessible names.
             # Its original Copy action is the rightmost button, immediately
             # against the verified toolbar's right edge (Save is before it).
             for pane in _elements(root, automation, automation.CreateTrueCondition()):
-                data = _element_data(pane)
-                l, t, r, b = data.rect
-                if not (data.process_id == process_id and data.handle and data.title == "Snipaste"
-                        and data.class_name == "QWidget" and 24 <= b-t <= 120 and r-l > 5*(b-t)):
-                    continue
-                row = []
-                for control in _elements(pane, automation, automation.CreateTrueCondition()):
-                    item = _element_data(control)
-                    if (item.class_name == "QPushButton" and item.process_id == process_id
-                            and _visible(item, control)):
-                        row.append((item, control))
-                if len(row) >= 8:
-                    item, control = max(row, key=lambda pair: pair[0].rect[2])
-                    if (0 <= r-item.rect[2] <= 4 and abs(item.rect[1]-t) <= 4
-                            and bool(control.CurrentIsEnabled)):
-                        matches.append(control)
+                matches.extend(_icon_copy_buttons(pane, automation, process_id))
         if len(matches) != 1:
             raise NativeSnipasteError("无法唯一识别 Snipaste 的复制按钮，请使用原工具栏复制截图。")
         # Recheck the native identity immediately before the sole write action.

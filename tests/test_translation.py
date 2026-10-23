@@ -16,13 +16,40 @@ def test_public_preserves_block_order_empty_positions_and_sentence_segments():
         assert request.url.params["sl"] == "auto"
         text = request.url.params["q"]
         seen.append(text)
+        if '\n' in text:
+            value = '\n'.join(f'译文:{line}。' for line in text.split('\n'))
+            return httpx.Response(200, json=[[[value, text]], None, 'en'])
         return httpx.Response(200, json=[[[f"译文:{text}", text], ["。", "!"]], None, "en"])
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         result = translate(["second", "", "first", "  ", "second"], client=client)
     assert result.texts == ["译文:second。", "", "译文:first。", "  ", "译文:second。"]
     assert result.detected_language == "en"
-    assert sorted(seen) == ["first", "second", "second"]
+    assert seen == ["second\nfirst\nsecond"]
+
+
+def test_public_batch_collapsed_lines_falls_back_without_misplacing_regions():
+    seen = []
+    def handler(request):
+        text = request.url.params['q']
+        seen.append(text)
+        value = '合并了两段' if '\n' in text else f'译文:{text}'
+        return httpx.Response(200, json=[[[value, text]], None, 'en'])
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert translate(['one', 'two'], client=client).texts == ['译文:one', '译文:two']
+    assert seen == ['one\ntwo', 'one', 'two']
+
+
+def test_public_multiline_input_and_large_blocks_remain_separate():
+    seen = []
+    def handler(request):
+        text = request.url.params['q']
+        seen.append(text)
+        return httpx.Response(200, json=[[[text.upper(), text]], None, 'en'])
+    texts = ['a\nb', 'c'*2800, 'd'*2800, 'e']
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert translate(texts, client=client).texts == [item.upper() for item in texts]
+    assert 'a\nb' in seen and 'c'*2800 in seen and 'd'*2800+'\ne' in seen
 
 
 def test_official_posts_batch_keeps_key_out_of_url_and_decodes_html():

@@ -22,6 +22,7 @@ CLOUD_ENDPOINT = "https://translation.googleapis.com/language/translate/v2"
 MAX_BLOCKS = 128
 MAX_CHARACTERS = 20000
 MAX_BLOCK_CHARACTERS = 4000
+PUBLIC_BATCH_CHARACTERS = 3000
 
 
 class TranslationError(RuntimeError):
@@ -67,6 +68,36 @@ def _public_one(client: httpx.Client, text: str, target: str, source: str) -> tu
         params={"client": "gtx", "sl": source, "tl": target, "dt": "t", "q": text},
     )
     return _parse_public(_check_response(response, "public"))
+
+
+def _public_groups(texts):
+    """Bound query size and keep multiline callers on the exact single path."""
+    group = []
+    length = 0
+    for index, text in enumerate(texts):
+        multiline = '\n' in text or '\r' in text
+        if group and (multiline or length + len(text) + 1 > PUBLIC_BATCH_CHARACTERS):
+            yield group
+            group, length = [], 0
+        if multiline or len(text) >= PUBLIC_BATCH_CHARACTERS:
+            yield [(index, text)]
+        else:
+            group.append((index, text))
+            length += len(text) + 1
+    if group:
+        yield group
+
+
+def _public_group(client, group, target, source):
+    if len(group) == 1:
+        return [_public_one(client, group[0][1], target, source)]
+    translated, language = _public_one(client, '\n'.join(text for _, text in group), target, source)
+    lines = translated.replace('\r\n', '\n').split('\n')
+    if len(lines) == len(group) and all(line.strip() for line in lines):
+        return [(line, language) for line in lines]
+    # Google may collapse line breaks. Discard the ambiguous batch and obtain
+    # separate results rather than placing text over the wrong image region.
+    return [_public_one(client, text, target, source) for _, text in group]
 
 
 def _official(
@@ -159,16 +190,18 @@ def translate(
             if provider == "official":
                 result = _official(http, active, target, source, api_key.strip())
             else:
-                pool = ThreadPoolExecutor(max_workers=min(3, len(active)), thread_name_prefix="google")
+                groups = list(_public_groups(active))
+                pool = ThreadPoolExecutor(max_workers=min(3, len(groups)), thread_name_prefix="google")
                 futures = {}
                 pairs = [("", "")] * len(active)
                 try:
                     futures = {
-                        pool.submit(_public_one, http, item, target, source): index
-                        for index, item in enumerate(active)
+                        pool.submit(_public_group, http, group, target, source): group
+                        for group in groups
                     }
                     for future in as_completed(futures):
-                        pairs[futures[future]] = future.result()
+                        for (index, _), pair in zip(futures[future], future.result(), strict=True):
+                            pairs[index] = pair
                 finally:
                     # On any failure discard queued work immediately. Only the
                     # at most three in-flight requests keep their finite timeout.

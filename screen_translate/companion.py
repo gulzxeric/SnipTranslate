@@ -87,6 +87,7 @@ class Companion(QObject):
         self._image = None
         self._ocr = None
         self._copy_sequence = 0
+        self._copy_request = 0
         self._last_problem = ""
         self._toolbar = None
         self._toolbar_snipper = 0
@@ -95,8 +96,9 @@ class Companion(QObject):
         self.timer.setInterval(250)
         self.timer.timeout.connect(self.poll)
         self.clipboard_timer = QTimer(self)
-        self.clipboard_timer.setInterval(100)
+        self.clipboard_timer.setInterval(25)
         self.clipboard_timer.timeout.connect(self.check_clipboard)
+        QApplication.clipboard().dataChanged.connect(self.check_clipboard)
         self.copy_timeout = QTimer(self)
         self.copy_timeout.setInterval(4000)
         self.copy_timeout.setSingleShot(True)
@@ -199,21 +201,34 @@ class Companion(QObject):
     def copy_selected_image(self):
         if not self._snipper or self._busy or self._waiting:
             return
+        self._request_started = perf_counter()
         from .snipaste_native import request_copy
         from .capture_location import begin_capture_log
         self._capture_log = begin_capture_log(self.preferences.snipaste_path)
         self.button.hide()
         self._waiting = True
         self._copy_sequence = clipboard_sequence()
+        self._copy_request += 1
+        request = self._copy_request
         handle = self._snipper.handle
-        self._copy = self._task(lambda: request_copy(handle), self.copy_invoked, self.copy_error)
-
-    def copy_invoked(self, ignored):
+        toolbar_handle = self._toolbar.handle if self._toolbar else 0
+        # InvokePattern can return after Snipaste has already published its
+        # bitmap. Observe the clipboard now, without waiting for that return.
         self.clipboard_timer.start()
         self.copy_timeout.start()
-        self.check_clipboard()
+        self._copy = self._task(
+            lambda: request_copy(handle, toolbar_handle),
+            lambda _: self.copy_invoked(request),
+            lambda message: self.copy_error(message, request),
+        )
 
-    def copy_error(self, message):
+    def copy_invoked(self, request):
+        if request == self._copy_request and self._waiting:
+            self.check_clipboard()
+
+    def copy_error(self, message, request=None):
+        if not self._waiting or (request is not None and request != self._copy_request):
+            return
         self._waiting = False
         self.clipboard_timer.stop()
         self.copy_timeout.stop()
@@ -230,6 +245,7 @@ class Companion(QObject):
         image = QApplication.clipboard().image()
         if image.isNull():
             return
+        self._copy_elapsed = perf_counter() - self._request_started
         self._waiting = False
         self.clipboard_timer.stop()
         self.copy_timeout.stop()
@@ -247,12 +263,12 @@ class Companion(QObject):
             return
         from .common import image_bytes
         self._busy = True
-        self._pipeline_started = perf_counter()
         self.button.hide()
         self.image_result.show_busy()
         image = image_bytes(self._image)
         preferences = replace(self.preferences)
         existing = self._ocr
+        prepared = perf_counter()
 
         def process():
             from .image_translation import paragraphs
@@ -269,7 +285,13 @@ class Companion(QObject):
                                api_key=preferences.effective_api_key, proxy=preferences.proxy)
             finished = perf_counter()
             task.signals.progress.emit('译文已返回，正在排版…')
-            return ocr, regions, result, {'ocr': recognized-started, 'google': finished-recognized}
+            return ocr, regions, result, {
+                'copy': self._copy_elapsed,
+                'prepare': prepared-self._request_started-self._copy_elapsed,
+                'queue': started-prepared,
+                'ocr': recognized-started,
+                'google': finished-recognized,
+            }
         task = Task(process)
         task.signals.progress.connect(self.image_result.set_progress)
         task.signals.success.connect(self.translated)
@@ -287,12 +309,18 @@ class Companion(QObject):
             started = perf_counter()
             image = render(self._image, regions, result.texts)
             timings['render'] = perf_counter()-started
-            timings['total'] = perf_counter()-self._pipeline_started
+            timings['total'] = perf_counter()-self._request_started
             self.image_result.set_result(image, f"完成·{timings['total']:.1f}秒")
-            self.image_result.status.setToolTip('识别 {ocr:.2f}秒 · 谷歌 {google:.2f}秒 · 排版 {render:.2f}秒'.format(**timings))
+            self.image_result.status.setToolTip(
+                '点击到完成 {total:.2f}秒\n取图 {copy:.2f}秒 · 准备 {prepare:.2f}秒 · 等待 {queue:.2f}秒\n'
+                '识别 {ocr:.2f}秒 · 谷歌 {google:.2f}秒 · 排版 {render:.2f}秒'.format(**timings))
             logger = logging.getLogger('SnipTranslate.performance')
             logger.setLevel(logging.INFO)
-            logger.info('ocr=%.3fs google=%.3fs render=%.3fs total=%.3fs', timings['ocr'], timings['google'], timings['render'], timings['total'])
+            logger.info(
+                'size=%dx%d blocks=%d copy=%.3fs prepare=%.3fs queue=%.3fs ocr=%.3fs google=%.3fs render=%.3fs total=%.3fs',
+                self._image.width(), self._image.height(), len(self._ocr.blocks),
+                timings['copy'], timings['prepare'], timings['queue'], timings['ocr'],
+                timings['google'], timings['render'], timings['total'])
         except Exception as exc:
             self.image_result.set_error('图片排版失败：' + str(exc))
 
@@ -301,6 +329,10 @@ class Companion(QObject):
         self.image_result.set_error(message)
 
     def retry(self):
+        if self._busy:
+            return
+        self._request_started = perf_counter()
+        self._copy_elapsed = 0
         self.start_translation()
 
     def show_result(self):
