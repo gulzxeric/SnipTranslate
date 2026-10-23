@@ -51,19 +51,21 @@ class FloatingTranslateButton(QWidget):
             | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.WindowDoesNotAcceptFocus
+            | Qt.WindowType.NoDropShadowWindowHint
         )
         super().__init__(parent, flags)
         self._physical_to_logical = physical_to_logical
         self.setObjectName("floatingTranslate")
         self.setWindowTitle("Snipaste 翻译")
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setFixedSize(90, 34)
         self.setStyleSheet(
-            "QWidget#floatingTranslate { background: transparent; }"
+            "QWidget#floatingTranslate { background: transparent; border: none; }"
             "QPushButton#floatingTranslateAction { background: #08ad69; color: white;"
-            " border: 1px solid #079d60; border-radius: 5px;"
+            " border: none; border-radius: 5px;"
             " font-family: 'Microsoft YaHei UI'; font-size: 14px; font-weight: 600;"
             " padding: 0; margin: 0; }"
             "QPushButton#floatingTranslateAction:hover { background: #07995d; }"
