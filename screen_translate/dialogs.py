@@ -59,6 +59,13 @@ class SettingsDialog(QDialog):
         form.addRow("HTTP / HTTPS 代理", self.proxy)
         self.source = language_combo(settings.source_language, auto=True)
         form.addRow("原文语言", self.source)
+        self.target = language_combo(settings.target_language)
+        form.addRow('翻译为', self.target)
+        self.engine = QComboBox()
+        self.engine.addItem('RapidOCR · 本地中英混排', 'rapidocr')
+        self.engine.addItem('Windows 系统 OCR', 'windows')
+        self.engine.setCurrentIndex(max(0, self.engine.findData(settings.ocr_engine)))
+        form.addRow('文字识别引擎', self.engine)
         self.ocr = QComboBox()
         self.ocr.addItem("系统识别语言", "auto")
         try:
@@ -68,6 +75,8 @@ class SettingsDialog(QDialog):
             pass
         self.ocr.setCurrentIndex(max(0, self.ocr.findData(settings.ocr_language)))
         form.addRow("本地 OCR 语言", self.ocr)
+        self.engine.currentIndexChanged.connect(lambda: self.ocr.setEnabled(self.engine.currentData() == 'windows'))
+        self.ocr.setEnabled(settings.ocr_engine == 'windows')
         path_row = QWidget()
         path_layout = QHBoxLayout(path_row)
         path_layout.setContentsMargins(0, 0, 0, 0)
@@ -121,8 +130,10 @@ class SettingsDialog(QDialog):
                 QMessageBox.warning(self, "代理地址有误", "请输入完整 HTTP 代理地址，例如 http://127.0.0.1:7890。")
                 return
         settings = replace(self.original, provider=self.provider.currentData(),
+                           ocr_engine=self.engine.currentData(),
                            api_key=self.key.text().strip(), proxy=proxy,
                            source_language=self.source.currentData(), ocr_language=self.ocr.currentData(),
+                           target_language=self.target.currentData(),
                            snipaste_path=self.snipaste.text().strip(),
                            auto_translate_clipboard=self.watch.isChecked(), always_on_top=self.top.isChecked())
         try:

@@ -51,6 +51,7 @@ def default_snipaste_path() -> str:
 
 @dataclass
 class Settings:
+    ocr_engine: str = "rapidocr"
     target_language: str = "zh-CN"
     source_language: str = "auto"
     ocr_language: str = "auto"

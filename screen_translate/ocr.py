@@ -2,9 +2,69 @@
 
 import asyncio
 import sys
+import threading
 from typing import Any
 
 from .models import OcrResult, Rect, TextBlock
+
+_rapid_engine = None
+_rapid_lock = threading.Lock()
+
+
+def recognize_image(image_bytes: bytes, language: str = 'auto', engine: str = 'rapidocr') -> OcrResult:
+    if engine == 'windows':
+        return recognize(image_bytes, language)
+    if engine != 'rapidocr':
+        raise OcrError('未知的文字识别引擎，请检查设置。')
+    if not image_bytes:
+        raise OcrError('截图为空，请重新截图。')
+    global _rapid_engine
+    try:
+        from io import BytesIO
+        from PIL import Image
+        import numpy as np
+        from rapidocr import RapidOCR
+        with Image.open(BytesIO(image_bytes)) as image:
+            image = image.convert('RGB')
+            width, height = image.size
+            pixels = np.asarray(image)[:, :, ::-1].copy()
+        with _rapid_lock:
+            if _rapid_engine is None:
+                _rapid_engine = RapidOCR(params={
+                    'Global.log_level': 'warning', 'Global.use_cls': False,
+                    'EngineConfig.onnxruntime.intra_op_num_threads': 2,
+                    'EngineConfig.onnxruntime.inter_op_num_threads': 1,
+                })
+            output = _rapid_engine(pixels, use_cls=False)
+        blocks = []
+        if output.boxes is not None and output.txts is not None:
+            for box, text in zip(output.boxes, output.txts):
+                if text.strip():
+                    left, top = box.min(axis=0)
+                    right, bottom = box.max(axis=0)
+                    # Detector boxes contain padding. On flat UI backgrounds,
+                    # recover actual glyph bounds so replacement type matches
+                    # the source size rather than the padded detector height.
+                    x0, y0 = max(0, int(left)), max(0, int(top))
+                    x1, y1 = min(width, int(right)+1), min(height, int(bottom)+1)
+                    crop = pixels[y0:y1, x0:x1]
+                    if crop.size and crop.shape[0] > 3 and crop.shape[1] > 3:
+                        corners = np.array([crop[0, 0], crop[-1, 0], crop[0, -1], crop[-1, -1]], dtype=float)
+                        background = np.median(corners, axis=0)
+                        if np.max(np.abs(corners-background)) < 20:
+                            mask = np.max(np.abs(crop.astype(float)-background), axis=2) > 55
+                            ys, xs = np.nonzero(mask)
+                            if len(xs) > 3:
+                                left, top = x0+int(xs.min()), y0+int(ys.min())
+                                right, bottom = x0+int(xs.max())+1, y0+int(ys.max())+1
+                    blocks.append(TextBlock(text, Rect(float(left), float(top), float(right-left), float(bottom-top))))
+        return OcrResult(blocks, 'zh-en', width, height)
+    except ImportError:
+        raise OcrError('缺少 RapidOCR 组件，请重新安装依赖或在设置中选择 Windows OCR。') from None
+    except OcrError:
+        raise
+    except Exception as exc:
+        raise OcrError('本地 RapidOCR 识别失败，请检查模型文件或切换 Windows OCR。') from exc
 
 
 class OcrError(RuntimeError):
