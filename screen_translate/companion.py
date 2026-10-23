@@ -10,6 +10,7 @@ import argparse
 import logging
 import sys
 from dataclasses import replace
+from time import perf_counter
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QFont
@@ -24,6 +25,7 @@ from .widgets import app_icon
 
 
 class Signals(QObject):
+    progress = Signal(str)
     success = Signal(object)
     failure = Signal(str)
 
@@ -36,10 +38,18 @@ class Task(QRunnable):
 
     def run(self):
         try:
-            self.signals.success.emit(self.callback())
+            result = self.callback()
         except Exception as exc:
             logging.warning("Companion task failed: %s", str(exc))
-            self.signals.failure.emit(str(exc))
+            try:
+                self.signals.failure.emit(str(exc))
+            except RuntimeError:
+                pass  # The application may have closed during background warmup.
+        else:
+            try:
+                self.signals.success.emit(result)
+            except RuntimeError:
+                pass  # QObject signals are gone after application teardown.
 
 
 class Companion(QObject):
@@ -106,6 +116,9 @@ class Companion(QObject):
         self.tray.activated.connect(lambda reason: self.settings() if reason == QSystemTrayIcon.ActivationReason.DoubleClick else None)
         self.tray.show()
         self.timer.start()
+        if self.preferences.ocr_engine == 'rapidocr':
+            from .ocr import warmup_ocr
+            self._warmup = self._task(warmup_ocr, lambda _: None, lambda _: None)
 
     def _task(self, callback, success, failure):
         task = Task(callback)
@@ -234,6 +247,7 @@ class Companion(QObject):
             return
         from .common import image_bytes
         self._busy = True
+        self._pipeline_started = perf_counter()
         self.button.hide()
         self.image_result.show_busy()
         image = image_bytes(self._image)
@@ -242,25 +256,43 @@ class Companion(QObject):
 
         def process():
             from .image_translation import paragraphs
+            started = perf_counter()
+            task.signals.progress.emit('正在本地识别文字…')
             ocr = existing or recognize_image(image, preferences.ocr_language, preferences.ocr_engine)
+            recognized = perf_counter()
             if not ocr.blocks:
                 raise ValueError("没有识别到文字。请选取清晰文字，或在设置中选择对应 OCR 语言。")
             regions = paragraphs(ocr)
+            task.signals.progress.emit(f'识别完成（{recognized-started:.1f}秒），正在调用谷歌翻译…')
             result = translate([region.text for region in regions], target=preferences.target_language,
                                source=preferences.source_language, provider=preferences.provider,
                                api_key=preferences.effective_api_key, proxy=preferences.proxy)
-            return ocr, regions, result
-        self._translation = self._task(process, self.translated, self.translation_failed)
+            finished = perf_counter()
+            task.signals.progress.emit('译文已返回，正在排版…')
+            return ocr, regions, result, {'ocr': recognized-started, 'google': finished-recognized}
+        task = Task(process)
+        task.signals.progress.connect(self.image_result.set_progress)
+        task.signals.success.connect(self.translated)
+        task.signals.failure.connect(self.translation_failed)
+        self._translation = task
+        self.pool.start(task)
 
     def translated(self, pair):
         self._busy = False
-        self._ocr, regions, result = pair
+        self._ocr, regions, result, timings = pair
         self._original_text = self._ocr.text
         self._translated_text = '\n\n'.join(result.texts)
         from .image_translation import render
         try:
+            started = perf_counter()
             image = render(self._image, regions, result.texts)
-            self.image_result.set_result(image)
+            timings['render'] = perf_counter()-started
+            timings['total'] = perf_counter()-self._pipeline_started
+            self.image_result.set_result(image, f"完成·{timings['total']:.1f}秒")
+            self.image_result.status.setToolTip('识别 {ocr:.2f}秒 · 谷歌 {google:.2f}秒 · 排版 {render:.2f}秒'.format(**timings))
+            logger = logging.getLogger('SnipTranslate.performance')
+            logger.setLevel(logging.INFO)
+            logger.info('ocr=%.3fs google=%.3fs render=%.3fs total=%.3fs', timings['ocr'], timings['google'], timings['render'], timings['total'])
         except Exception as exc:
             self.image_result.set_error('图片排版失败：' + str(exc))
 

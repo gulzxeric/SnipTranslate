@@ -141,6 +141,11 @@ class ImageResultWindow(QWidget):
         self.status.setText(label)
         self.update()
 
+    def set_progress(self, message):
+        if self._busy:
+            self._message = message
+            self.update()
+
     def set_error(self, text):
         self._busy = False
         self._message = text

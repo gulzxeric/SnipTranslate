@@ -32,7 +32,13 @@ def recognize_image(image_bytes: bytes, language: str = 'auto', engine: str = 'r
             if _rapid_engine is None:
                 _rapid_engine = RapidOCR(params={
                     'Global.log_level': 'warning', 'Global.use_cls': False,
-                    'EngineConfig.onnxruntime.intra_op_num_threads': 2,
+                    # The library's default min-side resize enlarges long,
+                    # narrow screenshots unnecessarily. Cap the longest edge.
+                    'Det.limit_type': 'max', 'Det.limit_side_len': 1280,
+                    # CPU batches otherwise pad short headings to the width
+                    # of the longest paragraph, wasting most inference work.
+                    'Rec.rec_batch_num': 1,
+                    'EngineConfig.onnxruntime.intra_op_num_threads': 4,
                     'EngineConfig.onnxruntime.inter_op_num_threads': 1,
                 })
             output = _rapid_engine(pixels, use_cls=False)
@@ -65,6 +71,21 @@ def recognize_image(image_bytes: bytes, language: str = 'auto', engine: str = 'r
         raise
     except Exception as exc:
         raise OcrError('本地 RapidOCR 识别失败，请检查模型文件或切换 Windows OCR。') from exc
+
+
+def warmup_ocr():
+    """Initialize both local sessions using generated text, without a network call."""
+    from io import BytesIO
+    from PIL import Image, ImageDraw, ImageFont
+    from pathlib import Path
+    import os
+    image = Image.new('RGB', (320, 72), 'white')
+    font_path = Path(os.environ.get('SystemRoot', 'C:/Windows')) / 'Fonts' / 'arial.ttf'
+    font = ImageFont.truetype(str(font_path), 26) if font_path.exists() else ImageFont.load_default(size=26)
+    ImageDraw.Draw(image).text((12, 12), 'Warmup ready', fill='black', font=font)
+    data = BytesIO()
+    image.save(data, format='PNG')
+    recognize_image(data.getvalue())
 
 
 class OcrError(RuntimeError):

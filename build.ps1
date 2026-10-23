@@ -1,3 +1,4 @@
+param([switch]$Clean)
 $ErrorActionPreference = 'Stop'
 Set-Location -LiteralPath $PSScriptRoot
 $taskPython = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
@@ -9,7 +10,9 @@ if ($LASTEXITCODE -ne 0) {
     throw 'PyInstaller missing. Run: .venv\Scripts\python.exe -m pip install pyinstaller'
 }
 & $taskPython -c "import comtypes.client; comtypes.client.GetModule('UIAutomationCore.dll')"
-& $taskPython -m PyInstaller --noconfirm --windowed --onedir --name SnipTranslate --collect-submodules winrt --collect-data winrt --collect-submodules comtypes.gen --collect-data comtypes --collect-all rapidocr --collect-binaries onnxruntime --copy-metadata rapidocr --copy-metadata onnxruntime run.py
+$taskBuildArgs = @()
+if ($Clean) { $taskBuildArgs += '--clean' }
+& $taskPython -m PyInstaller @taskBuildArgs --noconfirm --windowed --onedir --name SnipTranslate --collect-submodules winrt --collect-data winrt --collect-submodules comtypes.gen --collect-data comtypes --collect-all rapidocr --collect-binaries onnxruntime --copy-metadata rapidocr --copy-metadata onnxruntime run.py
 if ($LASTEXITCODE -ne 0) {
     throw 'Packaging failed. See PyInstaller output above.'
 }
