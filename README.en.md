@@ -6,17 +6,22 @@ Add a translation button to Snipaste: **F1 → select a region → click Transla
 
 This is a separate companion application, currently adapted to **Snipaste 2.11.3 x64**. The application UI is in Simplified Chinese.
 
+![SnipTranslate workflow illustration](docs/demo.gif)
+
+*Workflow illustration. Animation timing is not a translation-speed benchmark.*
+
 ## Download and use
 
-Download **SnipTranslate-v0.1.0-windows-x64.zip** from [Releases](https://github.com/gulzxeric/SnipTranslate/releases). Windows 10/11 x64 is required; Python is not needed for the packaged application.
+Download **SnipTranslate-v0.2.0-windows-x64.zip** from [Releases](https://github.com/gulzxeric/SnipTranslate/releases). Windows 10/11 x64 is required; Python is not needed for the packaged application.
 
 1. Install and start [Snipaste](https://www.snipaste.com/) separately. It is not included in the archive.
 2. **Extract the entire archive.** Keep `SnipTranslate.exe` together with the `_internal` folder.
 3. Run `SnipTranslate.exe`. If Snipaste cannot be found on first launch, select your installed `Snipaste.exe` when prompted.
 4. Allow the local OCR models to load, press F1 to select text, and click the green **翻译** (Translate) button below Snipaste's toolbar.
 5. Switch between source and translation, copy, save, pin, or select **文字** (Text) to inspect plain text.
+6. Press **Esc** or click **取消** (Cancel) while translating, then press F1 for another capture. Old results and errors cannot overwrite the new capture.
 
-The application runs in the system tray. Right-click its icon for settings, the latest result, or Exit. The translation button disappears when the capture completes or is cancelled.
+The application runs in the system tray. Right-click its icon for settings, the latest result, **检查更新** (Check for updates), or Exit. Update checks show version information and a link to GitHub Releases; downloading and replacing the application remains your choice. The translation button disappears when the capture completes or is cancelled.
 
 ### Start with Windows
 
@@ -68,6 +73,8 @@ Benchmark: `tools\benchmark_translation.py IMAGE_PATH`. For read-only diagnostic
 ```
 
 ## Feedback and third-party components
+
+The project source is licensed under the [MIT License](LICENSE), copyright **eric**. Third-party components retain their respective licenses.
 
 Open an [issue](https://github.com/gulzxeric/SnipTranslate/issues) with your Windows / Snipaste version, image dimensions, timings, and error details. Remove sensitive content before sharing screenshots.
 

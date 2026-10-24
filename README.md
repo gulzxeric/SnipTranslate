@@ -6,17 +6,22 @@
 
 这是独立运行的伴随工具，当前适配 **Snipaste 2.11.3 x64**，界面为简体中文。
 
+![SnipTranslate 操作示意](docs/demo.gif)
+
+*操作示意，动画时长不代表实际翻译耗时。*
+
 ## 下载与使用
 
-从 [Releases](https://github.com/gulzxeric/SnipTranslate/releases) 下载 **SnipTranslate-v0.1.0-windows-x64.zip**。需要 Windows 10/11 x64，无需安装 Python。
+从 [Releases](https://github.com/gulzxeric/SnipTranslate/releases) 下载 **SnipTranslate-v0.2.0-windows-x64.zip**。需要 Windows 10/11 x64，无需安装 Python。
 
 1. 自行安装并启动 [Snipaste](https://www.snipaste.com/)。压缩包不包含 Snipaste。
 2. **完整解压**压缩包，保留 `SnipTranslate.exe` 和 `_internal` 文件夹。
 3. 双击 `SnipTranslate.exe`。首次使用若未找到 Snipaste，会提示选择已安装的 `Snipaste.exe`。
 4. 等待后台加载 OCR 模型，然后按 F1 框选文字，点击原工具栏下方的绿色“翻译”按钮。
 5. 可切换原图／译图、复制、保存、贴图，或点击“文字”查看纯文本。
+6. 翻译中按 **Esc** 或点击 **取消**，即可重新按 F1 截图；旧任务的结果和错误不会覆盖新截图。
 
-助手只显示托盘图标。右键托盘图标可打开设置、查看最近译图或退出。截图完成或取消时，翻译按钮自动隐藏。
+助手只显示托盘图标。右键托盘图标可打开设置、查看最近译图、**检查更新**或退出。检查更新会提示版本并提供 GitHub 发布页入口，由你选择下载和替换程序。截图完成或取消时，翻译按钮自动隐藏。
 
 ### 开机启动
 
@@ -68,6 +73,8 @@ py -3 -m venv .venv
 ```
 
 ## 反馈与第三方组件
+
+本项目源码采用 [MIT 许可证](LICENSE)，版权人是 **eric**。第三方组件保留各自的许可证。
 
 请在 [Issues](https://github.com/gulzxeric/SnipTranslate/issues) 中提供 Windows / Snipaste 版本、截图尺寸、耗时和错误信息，分享截图前请移除敏感内容。
 

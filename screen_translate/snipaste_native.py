@@ -22,6 +22,7 @@ import threading
 from typing import Any, Iterator
 
 from .integration import IntegrationError, _executable
+from .cancellation import CancelledError, check_cancelled
 
 
 class NativeSnipasteError(IntegrationError):
@@ -201,7 +202,7 @@ def _uia_session() -> Iterator[tuple[Any, Any]]:
         module = comtypes.client.GetModule("UIAutomationCore.dll")
         automation = comtypes.client.CreateObject(module.CUIAutomation, interface=module.IUIAutomation)
         yield automation, module
-    except NativeSnipasteError:
+    except (NativeSnipasteError, CancelledError):
         raise
     except Exception as exc:
         raise NativeSnipasteError("无法读取 Snipaste 无障碍控件，请确认截图窗口仍打开且程序权限一致。") from exc
@@ -335,7 +336,7 @@ def _icon_copy_buttons(pane, automation, process_id):
     return []
 
 
-def request_copy(snipper_handle: int, toolbar_handle: int = 0) -> None:
+def request_copy(snipper_handle: int, toolbar_handle: int = 0, *, cancel_event=None, before_invoke=None) -> None:
     """Invoke only the original verified Snipper's enabled Copy button.
 
     This must run on the same dedicated UIA worker used for probes. The caller
@@ -344,6 +345,7 @@ def request_copy(snipper_handle: int, toolbar_handle: int = 0) -> None:
     """
     if threading.current_thread() is threading.main_thread():
         raise NativeSnipasteError("复制操作必须在专用后台线程中运行。")
+    check_cancelled(cancel_event)
     process_id = _assert_trusted_snipper(snipper_handle)
     with _uia_session() as (automation, module):
         root = automation.ElementFromHandle(snipper_handle)
@@ -377,6 +379,10 @@ def request_copy(snipper_handle: int, toolbar_handle: int = 0) -> None:
         pattern = matches[0].GetCurrentPattern(10000)  # InvokePattern
         if not pattern:
             raise NativeSnipasteError("Snipaste 复制按钮不支持无障碍调用，请手动复制截图。")
+        check_cancelled(cancel_event)
+        if before_invoke is not None:
+            before_invoke(ctypes.windll.user32.GetClipboardSequenceNumber())
+        check_cancelled(cancel_event)
         pattern.QueryInterface(module.IUIAutomationInvokePattern).Invoke()
 
 

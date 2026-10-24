@@ -6,14 +6,53 @@ import threading
 from typing import Any
 
 from .models import OcrResult, Rect, TextBlock
+from .cancellation import CancelledError, check_cancelled
 
 _rapid_engine = None
 _rapid_lock = threading.Lock()
+_rapid_context = threading.local()
 
 
-def recognize_image(image_bytes: bytes, language: str = 'auto', engine: str = 'rapidocr') -> OcrResult:
+def _wrap_rapid_sessions(engine):
+    # RapidOCR owns these ONNX sessions. Forward a per-job RunOptions without
+    # changing model parameters or keeping a terminated option on the engine.
+    for component in ('text_det', 'text_rec'):
+        wrapper = getattr(getattr(engine, component, None), 'session', None)
+        session = getattr(wrapper, 'session', None)
+        if session is None or getattr(session, '_snip_cancellable', False):
+            continue
+        original = session.run
+        def run(outputs, inputs, run_options=None, _original=original):
+            options = getattr(_rapid_context, 'options', None)
+            return _original(outputs, inputs, run_options=options if options is not None else run_options)
+        session.run = run
+        session._snip_cancellable = True
+
+
+def _run_rapid(engine, pixels, cancel_event):
+    unregister = None
+    try:
+        if cancel_event is not None and hasattr(cancel_event, 'register'):
+            from onnxruntime import RunOptions
+            options = RunOptions()
+            _rapid_context.options = options
+            unregister = cancel_event.register(lambda: setattr(options, 'terminate', True))
+        _wrap_rapid_sessions(engine)
+        result = engine(pixels, use_cls=False)
+        _wrap_rapid_sessions(engine)  # Sessions are lazy on the first warmup.
+        return result
+    finally:
+        _rapid_context.options = None
+        if unregister:
+            unregister()
+
+
+def recognize_image(image_bytes: bytes, language: str = 'auto', engine: str = 'rapidocr', *, cancel_event=None) -> OcrResult:
+    check_cancelled(cancel_event)
     if engine == 'windows':
-        return recognize(image_bytes, language)
+        result = recognize(image_bytes, language)
+        check_cancelled(cancel_event)
+        return result
     if engine != 'rapidocr':
         raise OcrError('未知的文字识别引擎，请检查设置。')
     if not image_bytes:
@@ -28,7 +67,10 @@ def recognize_image(image_bytes: bytes, language: str = 'auto', engine: str = 'r
             image = image.convert('RGB')
             width, height = image.size
             pixels = np.asarray(image)[:, :, ::-1].copy()
-        with _rapid_lock:
+        while not _rapid_lock.acquire(timeout=.05):
+            check_cancelled(cancel_event)
+        try:
+            check_cancelled(cancel_event)
             if _rapid_engine is None:
                 _rapid_engine = RapidOCR(params={
                     'Global.log_level': 'warning', 'Global.use_cls': False,
@@ -41,7 +83,11 @@ def recognize_image(image_bytes: bytes, language: str = 'auto', engine: str = 'r
                     'EngineConfig.onnxruntime.intra_op_num_threads': 4,
                     'EngineConfig.onnxruntime.inter_op_num_threads': 1,
                 })
-            output = _rapid_engine(pixels, use_cls=False)
+            check_cancelled(cancel_event)
+            output = _run_rapid(_rapid_engine, pixels, cancel_event)
+            check_cancelled(cancel_event)
+        finally:
+            _rapid_lock.release()
         blocks = []
         if output.boxes is not None and output.txts is not None:
             for box, text in zip(output.boxes, output.txts):
@@ -65,11 +111,14 @@ def recognize_image(image_bytes: bytes, language: str = 'auto', engine: str = 'r
                                 right, bottom = x0+int(xs.max())+1, y0+int(ys.max())+1
                     blocks.append(TextBlock(text, Rect(float(left), float(top), float(right-left), float(bottom-top))))
         return OcrResult(blocks, 'zh-en', width, height)
+    except CancelledError:
+        raise
     except ImportError:
         raise OcrError('缺少 RapidOCR 组件，请重新安装依赖或在设置中选择 Windows OCR。') from None
     except OcrError:
         raise
     except Exception as exc:
+        check_cancelled(cancel_event)
         raise OcrError('本地 RapidOCR 识别失败，请检查模型文件或切换 Windows OCR。') from exc
 
 

@@ -9,25 +9,30 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Event
 from time import perf_counter
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Qt, QUrl
+from PySide6.QtGui import QFont, QDesktopServices
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon
 
 from .dialogs import SettingsDialog, language_combo
-from .google_translate import TranslationService, translate
+from .async_translate import InterruptibleTranslationService
+from .cancellation import CancellationToken, CancelledError, check_cancelled
 from .ocr import recognize_image
 from .settings import Settings
 from .widgets import app_icon
+from . import __version__
 
 
 class Signals(QObject):
     progress = Signal(str)
     success = Signal(object)
     failure = Signal(str)
+    finished = Signal()
 
 
 class Task(QRunnable):
@@ -39,6 +44,8 @@ class Task(QRunnable):
     def run(self):
         try:
             result = self.callback()
+        except CancelledError:
+            pass
         except Exception as exc:
             logging.warning("Companion task failed: %s", str(exc))
             try:
@@ -50,16 +57,23 @@ class Task(QRunnable):
                 self.signals.success.emit(result)
             except RuntimeError:
                 pass  # QObject signals are gone after application teardown.
+        finally:
+            try:
+                self.signals.finished.emit()
+            except RuntimeError:
+                pass
 
 
 class Companion(QObject):
+    copy_prepared = Signal(int, object)
+
     def __init__(self, application: QApplication, preferences: Settings):
         super().__init__()
         from .companion_widgets import FloatingTranslateButton, MiniResultWindow
         from .snipaste_native import NativeSnipaste
         self.app = application
         self.preferences = preferences
-        self.translator = TranslationService()
+        self.translator = InterruptibleTranslationService()
         application.aboutToQuit.connect(self.translator.close)
         self.native = NativeSnipaste(preferences.snipaste_path)
         from .coordinates import physical_to_logical
@@ -71,6 +85,8 @@ class Companion(QObject):
         self.image_result.settings_requested.connect(self.settings)
         self.image_result.retry_requested.connect(self.retry)
         self.image_result.pin_requested.connect(self.pin_image)
+        self.image_result.cancelled.connect(lambda: self.cancel_translation(close_result=False))
+        self.copy_prepared.connect(self.copy_ready)
         self._original_text = self._translated_text = ''
         self._capture_rect = None
         self._capture_log = None
@@ -78,7 +94,15 @@ class Companion(QObject):
         self.result.retry_requested.connect(self.retry)
         self.result.settings_requested.connect(self.settings)
         self.pool = QThreadPool(self)
-        self.pool.setMaxThreadCount(2)
+        self.pool.setMaxThreadCount(1)
+        self.workers = ThreadPoolExecutor(max_workers=2, thread_name_prefix='screenshot')
+        self._native_tasks = {}
+        self._pipeline_jobs = {}
+        self._job_generation = 0
+        self._translation_cancel = None
+        self._copy_cancel = None
+        self._copy_ready = False
+        self._copy_complete = False
         self._probe = None
         self._copy = None
         self._translation = None
@@ -113,6 +137,7 @@ class Companion(QObject):
         menu.addSeparator()
         menu.addAction("设置", self.settings)
         menu.addAction("查看最近译文", self.show_result)
+        self.update_action = menu.addAction('检查更新…', self.check_updates)
         menu.addSeparator()
         menu.addAction("退出", self.quit)
         self.tray_menu = menu
@@ -122,23 +147,28 @@ class Companion(QObject):
         self.timer.start()
         if self.preferences.ocr_engine == 'rapidocr':
             from .ocr import warmup_ocr
-            self._warmup = self._task(warmup_ocr, lambda _: None, lambda _: None)
+            self._warmup = self.workers.submit(warmup_ocr)
 
     def _task(self, callback, success, failure):
         task = Task(callback)
         task.signals.success.connect(success)
         task.signals.failure.connect(failure)
+        identifier = id(task)
+        self._native_tasks[identifier] = task
+        task.signals.finished.connect(lambda: self._native_tasks.pop(identifier, None))
         self.pool.start(task)
         return task
 
     def poll(self):
-        if self._probing or self._busy or self._waiting:
+        if self._probing or self._waiting:
             if self._busy or self._waiting:
                 self.button.hide()
             return
         self._probing = True
         cached_toolbar = self._toolbar
         cached_snipper = self._toolbar_snipper
+        request = getattr(self, '_copy_request', 0)
+        supersede = self._busy and self._copy_complete
 
         def probe():
             from .snipaste_native import probe_toolbar
@@ -160,11 +190,22 @@ class Companion(QObject):
                 if toolbar:
                     return window, toolbar
             return snippers[0], None
-        self._probe = self._task(probe, self.probed, self.probe_failed)
+        self._probe = self._task(probe, lambda result: self.probed(result, request, supersede), self.probe_failed)
 
-    def probed(self, result):
+    def probed(self, result, request=None, supersede=False):
         self._probing = False
+        if request is not None and request != getattr(self, '_copy_request', 0):
+            return
         snipper, toolbar = result
+        if self._busy:
+            if supersede and snipper and toolbar:
+                self.cancel_translation(refresh=False)
+            else:
+                self.button.hide()
+                if not snipper:
+                    self._toolbar = None
+                    self._toolbar_snipper = 0
+                return
         self._snipper = snipper
         # Snipaste may hide/rebuild PaintBar while hovering annotation tools,
         # opening their palettes or moving quickly across its edge. A confirmed
@@ -209,6 +250,10 @@ class Companion(QObject):
         self._capture_log = begin_capture_log(self.preferences.snipaste_path)
         self.button.hide()
         self._waiting = True
+        self._copy_ready = False
+        self._copy_complete = False
+        self._copy_cancel = Event()
+        cancel_event = self._copy_cancel
         self._copy_sequence = clipboard_sequence()
         self._copy_request += 1
         request = self._copy_request
@@ -219,19 +264,30 @@ class Companion(QObject):
         self.clipboard_timer.start()
         self.copy_timeout.start()
         self._copy = self._task(
-            lambda: request_copy(handle, toolbar_handle),
+            lambda: request_copy(handle, toolbar_handle, cancel_event=cancel_event,
+                before_invoke=lambda sequence: self.copy_prepared.emit(request, sequence)),
             lambda _: self.copy_invoked(request),
             lambda message: self.copy_error(message, request),
         )
 
     def copy_invoked(self, request):
+        if request == self._copy_request:
+            self._copy_complete = True
+            if self._waiting:
+                self.check_clipboard()
+
+    def copy_ready(self, request, sequence):
         if request == self._copy_request and self._waiting:
+            self._copy_sequence = sequence
+            self._copy_ready = True
             self.check_clipboard()
 
     def copy_error(self, message, request=None):
         if not self._waiting or (request is not None and request != self._copy_request):
             return
         self._waiting = False
+        if self._copy_cancel:
+            self._copy_cancel.set()
         self.clipboard_timer.stop()
         self.copy_timeout.stop()
         self.result.set_error(message)
@@ -242,10 +298,11 @@ class Companion(QObject):
         self.copy_error("未取得当前选区。请在 Snipaste 中选好范围后，再点击翻译。")
 
     def check_clipboard(self):
-        if not self._waiting or clipboard_sequence() == self._copy_sequence:
+        if not self._waiting or not self._copy_ready or clipboard_sequence() == self._copy_sequence:
             return
+        request = self._copy_request
         image = QApplication.clipboard().image()
-        if image.isNull():
+        if image.isNull() or request != self._copy_request or not self._waiting:
             return
         self._copy_elapsed = perf_counter() - self._request_started
         self._waiting = False
@@ -265,6 +322,10 @@ class Companion(QObject):
             return
         from .common import image_bytes
         self._busy = True
+        self._job_generation += 1
+        generation = self._job_generation
+        cancel_event = CancellationToken()
+        self._translation_cancel = cancel_event
         self.button.hide()
         self.image_result.show_busy()
         preferences = replace(self.preferences)
@@ -273,37 +334,59 @@ class Companion(QObject):
         image = image_bytes(self._image, 'BMP' if preferences.ocr_engine == 'rapidocr' else 'PNG')
         existing = self._ocr
         prepared = perf_counter()
+        request_started, copy_elapsed = self._request_started, self._copy_elapsed
+        translator = self.translator
 
         def process():
             from .image_translation import paragraphs
             started = perf_counter()
-            task.signals.progress.emit('正在本地识别文字…')
-            ocr = existing or recognize_image(image, preferences.ocr_language, preferences.ocr_engine)
+            check_cancelled(cancel_event)
+            signals.progress.emit('正在本地识别文字…')
+            ocr = existing or recognize_image(image, preferences.ocr_language, preferences.ocr_engine,
+                                               cancel_event=cancel_event)
+            check_cancelled(cancel_event)
             recognized = perf_counter()
             if not ocr.blocks:
                 raise ValueError("没有识别到文字。请选取清晰文字，或在设置中选择对应 OCR 语言。")
             regions = paragraphs(ocr)
-            task.signals.progress.emit(f'识别完成（{recognized-started:.1f}秒），正在调用谷歌翻译…')
-            result = self.translator.translate([region.text for region in regions], target=preferences.target_language,
+            signals.progress.emit(f'识别完成（{recognized-started:.1f}秒），正在调用谷歌翻译…')
+            result = translator.translate([region.text for region in regions], target=preferences.target_language,
                                source=preferences.source_language, provider=preferences.provider,
-                               api_key=preferences.effective_api_key, proxy=preferences.proxy)
+                               api_key=preferences.effective_api_key, proxy=preferences.proxy, cancel_event=cancel_event)
+            check_cancelled(cancel_event)
             finished = perf_counter()
-            task.signals.progress.emit('译文已返回，正在排版…')
+            signals.progress.emit('译文已返回，正在排版…')
             return ocr, regions, result, {
-                'copy': self._copy_elapsed,
-                'prepare': prepared-self._request_started-self._copy_elapsed,
+                'copy': copy_elapsed,
+                'prepare': prepared-request_started-copy_elapsed,
                 'queue': started-prepared,
                 'ocr': recognized-started,
                 'google': finished-recognized,
             }
         task = Task(process)
-        task.signals.progress.connect(self.image_result.set_progress)
-        task.signals.success.connect(self.translated)
-        task.signals.failure.connect(self.translation_failed)
+        signals = task.signals
+        signals.progress.connect(lambda message: self.translation_progress(message, generation))
+        signals.success.connect(lambda result: self.translated(result, generation))
+        signals.failure.connect(lambda message: self.translation_failed(message, generation))
+        signals.finished.connect(lambda: self._pipeline_jobs.pop(generation, None))
         self._translation = task
-        self.pool.start(task)
+        future = self.workers.submit(task.run)
+        self._pipeline_jobs[generation] = (task, future, cancel_event)
+        def finished(done):
+            if done.cancelled():
+                try:
+                    signals.finished.emit()
+                except RuntimeError:
+                    pass
+        future.add_done_callback(finished)
 
-    def translated(self, pair):
+    def translation_progress(self, message, generation):
+        if generation == self._job_generation and self._busy:
+            self.image_result.set_progress(message)
+
+    def translated(self, pair, generation=None):
+        if generation is not None and generation != self._job_generation:
+            return
         self._busy = False
         self._ocr, regions, result, timings = pair
         self._original_text = self._ocr.text
@@ -328,9 +411,35 @@ class Companion(QObject):
         except Exception as exc:
             self.image_result.set_error('图片排版失败：' + str(exc))
 
-    def translation_failed(self, message):
+    def translation_failed(self, message, generation=None):
+        if generation is not None and generation != self._job_generation:
+            return
         self._busy = False
         self.image_result.set_error(message)
+
+    def cancel_translation(self, *, close_result=True, refresh=True):
+        if not self._busy and not self._waiting:
+            return
+        logger = logging.getLogger('SnipTranslate.performance')
+        logger.setLevel(logging.INFO)
+        logger.info('cancel job=%d copy_wait=%s processing=%s', self._job_generation, self._waiting, self._busy)
+        self._busy = self._waiting = False
+        self._job_generation += 1
+        self._copy_request += 1
+        self._copy_ready = self._copy_complete = False
+        if self._copy_cancel:
+            self._copy_cancel.set()
+        if self._translation_cancel:
+            self._translation_cancel.set()
+        for _, future, token in list(self._pipeline_jobs.values()):
+            token.set()
+            future.cancel()
+        self.clipboard_timer.stop()
+        self.copy_timeout.stop()
+        if close_result:
+            self.image_result.close()
+        if refresh:
+            self.poll()
 
     def retry(self):
         if self._busy:
@@ -351,6 +460,40 @@ class Companion(QObject):
         self.result.set_result(self._original_text, self._translated_text)
         self.result.raise_()
         self.result.activateWindow()
+
+    def check_updates(self):
+        from .updates import check_for_updates
+        self.update_action.setEnabled(False)
+        task = Task(lambda: check_for_updates(__version__))
+        task.signals.success.connect(self.update_checked)
+        task.signals.failure.connect(lambda message: self.update_checked(None, message))
+        task.signals.finished.connect(lambda: self.update_action.setEnabled(True))
+        self._update_task = task
+        self._update_future = self.workers.submit(task.run)
+
+    def update_checked(self, info, error=None):
+        from .updates import RELEASES_URL
+        parent = self.image_result if self.image_result.isVisible() else None
+        dialog = QMessageBox(parent)
+        dialog.setWindowTitle('检查更新')
+        dialog.setTextFormat(Qt.TextFormat.PlainText)
+        dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        if error:
+            text, url = error, RELEASES_URL
+        elif info.latest:
+            label = '（预览版）' if info.preview else ''
+            text = f'当前版本：v{__version__}\n发现新版本：{info.latest}{label}\n打开发布页查看并下载更新？'
+            url = info.url
+        else:
+            dialog.setText(f'当前版本：v{__version__}\nGitHub 暂无更新版本。')
+            dialog.exec()
+            return
+        dialog.setText(text)
+        open_button = dialog.addButton('打开发布页', QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton('关闭', QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() is open_button:
+            QDesktopServices.openUrl(QUrl(url))
 
     def pin_image(self, image):
         from .integration import _executable, _launch, IntegrationError
@@ -379,11 +522,9 @@ class Companion(QObject):
             self.native = NativeSnipaste(self.preferences.snipaste_path)
 
     def quit(self):
-        if self._busy or self._waiting:
-            self.result.set_error("正在处理当前截图，完成后可退出。")
-            self.show_result()
-            return
+        self.cancel_translation(refresh=False)
         self.timer.stop()
+        self.workers.shutdown(wait=False, cancel_futures=True)
         self.tray.hide()
         self.button.close()
         self.image_result.close()
@@ -457,7 +598,11 @@ def main() -> int:
                 raise RuntimeError("OCR self-test returned no text")
             from .image_translation import paragraphs, render
             regions = paragraphs(ocr)
-            result = translate([region.text for region in regions])
+            service = InterruptibleTranslationService()
+            try:
+                result = service.translate([region.text for region in regions])
+            finally:
+                service.close(wait=True)
             translated_image = render(canvas, regions, result.texts)
             if translated_image.isNull() or translated_image == canvas:
                 raise RuntimeError('Translated image self-test failed')

@@ -16,7 +16,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 $taskBuildArgs = @()
 if ($Clean) { $taskBuildArgs += '--clean' }
-& $taskPython -m PyInstaller @taskBuildArgs --noconfirm --windowed --onedir --name SnipTranslate --collect-submodules winrt --collect-data winrt --collect-submodules comtypes.gen --collect-data comtypes --collect-all rapidocr --collect-binaries onnxruntime --copy-metadata rapidocr --copy-metadata onnxruntime run.py
+& $taskPython -m PyInstaller @taskBuildArgs --noconfirm --windowed --onedir --name SnipTranslate --hidden-import anyio._backends._asyncio --collect-submodules winrt --collect-data winrt --collect-submodules comtypes.gen --collect-data comtypes --collect-all rapidocr --collect-binaries onnxruntime --copy-metadata rapidocr --copy-metadata onnxruntime run.py
 if ($LASTEXITCODE -ne 0) {
     throw 'Packaging failed. See PyInstaller output above.'
 }

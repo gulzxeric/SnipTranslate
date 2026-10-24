@@ -39,6 +39,8 @@ def test_clipboard_starts_translation_before_invoke_returns(monkeypatch):
     owner.copy_selected_image()
     monkeypatch.setattr(companion, 'clipboard_sequence', lambda: 12)
     owner.check_clipboard()
+    owner.start_translation.assert_not_called()
+    owner.copy_ready(owner._copy_request, 11)
     owner.start_translation.assert_called_once()
     assert not owner._waiting
     assert owner._copy_elapsed >= 0

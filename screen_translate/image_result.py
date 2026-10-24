@@ -25,6 +25,7 @@ class ImageResultWindow(QWidget):
     settings_requested = Signal()
     retry_requested = Signal()
     pin_requested = Signal(QImage)
+    cancelled = Signal()
 
     def __init__(self):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
@@ -127,6 +128,7 @@ class ImageResultWindow(QWidget):
         self.toggle.setEnabled(False)
         for button in self.buttons[:-2]:
             button.setEnabled(False)
+        self.buttons[-1].setText('取消')
         self.reveal()
         self.update()
 
@@ -138,6 +140,7 @@ class ImageResultWindow(QWidget):
         self.toggle.setEnabled(True)
         for button in self.buttons:
             button.setEnabled(True)
+        self.buttons[-1].setText('关闭')
         self.status.setText(label)
         self.update()
 
@@ -152,6 +155,7 @@ class ImageResultWindow(QWidget):
         self.status.setText('翻译未完成')
         for button in self.buttons:
             button.setEnabled(True)
+        self.buttons[-1].setText('关闭')
         self.update()
 
     def current_image(self):
@@ -187,6 +191,13 @@ class ImageResultWindow(QWidget):
             QApplication.clipboard().setImage(self.current_image())
             self.status.setText('图片已复制')
 
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            self.close()
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
     def save_image(self):
         if not self.has_image or self._busy:
             return
@@ -202,6 +213,16 @@ class ImageResultWindow(QWidget):
 
     def closeEvent(self, event):
         self._closed = True
+        was_busy = self._busy
+        self._busy = False
+        if was_busy:
+            self._message = ''
+            self.status.setText('已取消')
+            for button in self.buttons:
+                button.setEnabled(True)
+            self.buttons[-1].setText('关闭')
+            self.toggle.setEnabled(not self.translated.isNull())
+            self.cancelled.emit()
         for backdrop in self._backdrops:
             backdrop.close()
             backdrop.deleteLater()

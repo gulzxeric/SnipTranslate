@@ -192,10 +192,14 @@ def _official(
         json=body,
     )
     payload = _check_response(response, "official")
+    return _parse_official(payload, len(texts))
+
+
+def _parse_official(payload, count):
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
         raise TranslationError("谷歌 Cloud 翻译响应格式异常，请重试。")
     items = payload["data"].get("translations")
-    if not isinstance(items, list) or len(items) != len(texts):
+    if not isinstance(items, list) or len(items) != count:
         raise TranslationError("谷歌 Cloud 翻译返回的行数不完整，请重试。")
     translated: list[str] = []
     languages: list[str] = []

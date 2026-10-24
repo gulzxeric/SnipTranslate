@@ -17,6 +17,19 @@ sys.path.insert(0, str(ROOT))
 from screen_translate import __version__
 
 
+def include_runtime_file(path):
+    name = path.name.lower()
+    if name.endswith('.excluded'):
+        return False
+    if name.startswith('opencv_videoio_ffmpeg') and name.endswith('.dll'):
+        return False  # Screenshot OCR never opens video streams.
+    if path.parent.name == 'PIL' and name.startswith('_avif.') and name.endswith('.pyd'):
+        return False  # The capture pipeline reads in-memory BMP / PNG.
+    if name == 'ch_ppocr_mobile_v2.0_cls_mobile.onnx':
+        return False  # Orientation classification is disabled for screenshots.
+    return True
+
+
 def dependencies():
     pending = deque(['pyinstaller'])
     for line in (ROOT / 'requirements.txt').read_text(encoding='utf-8').splitlines():
@@ -58,10 +71,12 @@ def package():
     versions = {}
     with ZipFile(archive, 'w', compression=ZIP_DEFLATED, compresslevel=6) as bundle:
         for path in sorted(application.rglob('*')):
-            if path.is_file() and not path.name.endswith('.excluded'):
+            if path.is_file() and include_runtime_file(path):
                 bundle.write(path, 'SnipTranslate/' + path.relative_to(application).as_posix())
-        for name in ['README.md', 'README.en.md', 'RELEASE_NOTES.md']:
+        for name in ['README.md', 'README.en.md', 'RELEASE_NOTES.md', 'LICENSE']:
             bundle.write(ROOT / name, 'SnipTranslate/' + name)
+        for path in (ROOT / 'docs').glob('*.gif'):
+            bundle.write(path, 'SnipTranslate/docs/' + path.name)
         python_license = Path(sys.base_prefix) / 'LICENSE.txt'
         if not python_license.is_file():
             raise RuntimeError('Python LICENSE.txt is required for this Windows release.')
