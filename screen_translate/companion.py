@@ -18,7 +18,7 @@ from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QSystemTrayIcon
 
 from .dialogs import SettingsDialog, language_combo
-from .google_translate import translate
+from .google_translate import TranslationService, translate
 from .ocr import recognize_image
 from .settings import Settings
 from .widgets import app_icon
@@ -59,6 +59,8 @@ class Companion(QObject):
         from .snipaste_native import NativeSnipaste
         self.app = application
         self.preferences = preferences
+        self.translator = TranslationService()
+        application.aboutToQuit.connect(self.translator.close)
         self.native = NativeSnipaste(preferences.snipaste_path)
         from .coordinates import physical_to_logical
         self.button = FloatingTranslateButton(physical_to_logical=physical_to_logical)
@@ -265,8 +267,10 @@ class Companion(QObject):
         self._busy = True
         self.button.hide()
         self.image_result.show_busy()
-        image = image_bytes(self._image)
         preferences = replace(self.preferences)
+        # This bitmap stays in memory. PNG compression costs time without
+        # reducing OCR inference work; BMP preserves the same RGB pixels.
+        image = image_bytes(self._image, 'BMP' if preferences.ocr_engine == 'rapidocr' else 'PNG')
         existing = self._ocr
         prepared = perf_counter()
 
@@ -280,7 +284,7 @@ class Companion(QObject):
                 raise ValueError("没有识别到文字。请选取清晰文字，或在设置中选择对应 OCR 语言。")
             regions = paragraphs(ocr)
             task.signals.progress.emit(f'识别完成（{recognized-started:.1f}秒），正在调用谷歌翻译…')
-            result = translate([region.text for region in regions], target=preferences.target_language,
+            result = self.translator.translate([region.text for region in regions], target=preferences.target_language,
                                source=preferences.source_language, provider=preferences.provider,
                                api_key=preferences.effective_api_key, proxy=preferences.proxy)
             finished = perf_counter()

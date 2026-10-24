@@ -3,6 +3,8 @@ from collections import Counter
 from dataclasses import dataclass
 from statistics import median
 
+import numpy as np
+
 from PySide6.QtCore import QPointF, QRectF
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QImage, QPainter, QTextLayout, QTextOption
 
@@ -56,7 +58,19 @@ def paragraphs(ocr: OcrResult) -> list[Region]:
     return regions
 
 
-def _colors(image, region):
+def _rgb_view(image):
+    # Keep the owning QImage alive alongside this strided, read-only view.
+    # Unusual and premultiplied formats keep Qt's original pixel conversion.
+    if image.format() not in (QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32,
+                              QImage.Format.Format_RGB888, QImage.Format.Format_RGBA8888):
+        return None, None
+    owner = image.convertToFormat(QImage.Format.Format_RGB888)
+    pixels = np.ndarray((owner.height(), owner.width(), 3), dtype=np.uint8,
+                        buffer=owner.constBits(), strides=(owner.bytesPerLine(), 3, 1))
+    return owner, pixels
+
+
+def _colors(image, region, pixels=None):
     r = region.rect
     perimeter = []
     for i in range(50):
@@ -68,15 +82,30 @@ def _colors(image, region):
     bucket = Counter(perimeter).most_common(1)[0][0] if perimeter else (31, 31, 31)
     background = QColor(*(min(255, n*8+7) for n in bucket))
     ink = []
+    background_rgb = np.array(background.getRgb()[:3], dtype=np.int16) if pixels is not None else None
     for block in region.blocks:
         b = block.rect
         step = max(1, int((b.width*b.height/6000)**.5))
+        if pixels is not None:
+            y0, x0 = max(0, int(b.y)), max(0, int(b.x))
+            y1 = max(y0, min(image.height(), int(b.y+b.height)+1))
+            x1 = max(x0, min(image.width(), int(b.x+b.width)+1))
+            crop = pixels[y0:y1:step, x0:x1:step]
+            samples = crop.reshape(-1, 3)
+            difference = np.abs(samples.astype(np.int16)-background_rgb).sum(axis=1)
+            selected = samples[difference > 150]
+            if len(selected):
+                ink.append(selected)
+            continue
         for y in range(max(0, int(b.y)), min(image.height(), int(b.y+b.height)+1), step):
             for x in range(max(0, int(b.x)), min(image.width(), int(b.x+b.width)+1), step):
                 c = image.pixelColor(x, y)
                 if sum(abs(a-z) for a, z in zip(c.getRgb()[:3], background.getRgb()[:3])) > 150:
                     ink.append(c.getRgb()[:3])
-    foreground = QColor(*(int(median([p[i] for p in ink])) for i in range(3))) if ink else QColor('#202020')
+    if pixels is not None:
+        foreground = QColor(*(int(n) for n in np.median(np.concatenate(ink), axis=0))) if ink else QColor('#202020')
+    else:
+        foreground = QColor(*(int(median([p[i] for p in ink])) for i in range(3))) if ink else QColor('#202020')
     return background, foreground
 
 
@@ -113,6 +142,7 @@ def render(image: QImage, regions: list[Region], translations: list[str]) -> QIm
     if len(regions) != len(translations):
         raise ValueError('译文段落数量不匹配。')
     output = image.convertToFormat(QImage.Format.Format_RGB32).copy()
+    pixel_owner, pixels = _rgb_view(image)
     painter = QPainter(output)
     painter.setRenderHint(QPainter.RenderHint.TextAntialiasing)
     bounds = QRectF(0, 0, image.width(), image.height())
@@ -120,7 +150,7 @@ def render(image: QImage, regions: list[Region], translations: list[str]) -> QIm
         if not translated.strip() or translated == region.text:
             continue
         r = region.rect
-        background, foreground = _colors(image, region)
+        background, foreground = _colors(image, region, pixels)
         line_height = median([b.rect.height for b in region.blocks])
         available = r.height + max(4, line_height*.4)
         for other in regions:

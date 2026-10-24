@@ -2,11 +2,11 @@ from PySide6.QtCore import QBuffer, QByteArray, QIODevice
 from PySide6.QtGui import QImage
 
 
-def image_bytes(image: QImage) -> bytes:
+def image_bytes(image: QImage, encoding: str = 'PNG') -> bytes:
     data = QByteArray()
     buffer = QBuffer(data)
     buffer.open(QIODevice.OpenModeFlag.WriteOnly)
-    if not image.save(buffer, "PNG"):
+    if not image.save(buffer, encoding):
         raise ValueError("无法读取图片，请重新截图。")
     buffer.close()
     return bytes(data)

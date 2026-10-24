@@ -9,6 +9,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import nullcontext
 from html import unescape
+from threading import Lock
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -27,6 +28,85 @@ PUBLIC_BATCH_CHARACTERS = 3000
 
 class TranslationError(RuntimeError):
     """A translation failed; the message can be shown directly in the UI."""
+
+
+def _new_client(proxy: str) -> httpx.Client:
+    try:
+        return httpx.Client(
+            proxy=proxy or None,
+            timeout=httpx.Timeout(20.0, connect=8.0, pool=8.0),
+            limits=httpx.Limits(max_connections=3, max_keepalive_connections=3,
+                               keepalive_expiry=120.0),
+            headers={"User-Agent": "ScreenshotTranslate/1.0", "Accept": "application/json"},
+            verify=True,
+            follow_redirects=False,
+        )
+    except (ValueError, ImportError, httpx.InvalidURL):
+        raise TranslationError("网络或代理配置无效，请检查设置；SOCKS 代理需要 httpx[socks]。") from None
+
+
+class TranslationService:
+    """Own reusable connections for successive screenshots.
+
+    Calls may overlap. A proxy change retires the old client; an in-flight
+    request can finish before that client is closed. ``close()`` is idempotent
+    and does not block the UI waiting for a network request to finish.
+    """
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._client: httpx.Client | None = None
+        self._proxy = ""
+        self._active: dict[httpx.Client, int] = {}
+        self._closed = False
+
+    def translate(
+        self,
+        texts: list[str],
+        target: str = "zh-CN",
+        source: str = "auto",
+        api_key: str = "",
+        proxy: str = "",
+        provider: str = "public",
+    ) -> TranslationResult:
+        _validate(texts, target, source, provider, proxy)
+        if provider == "official" and not api_key.strip():
+            raise TranslationError("使用谷歌 Cloud 翻译需要 API Key，请先在设置中填写。")
+        retired = None
+        with self._lock:
+            if self._closed:
+                raise TranslationError("翻译服务已关闭，请重新启动翻译助手。")
+            if not any(text.strip() for text in texts):
+                return TranslationResult(list(texts))
+            if self._client is None or self._proxy != proxy:
+                client = _new_client(proxy)
+                if self._client not in self._active:
+                    retired = self._client
+                self._client, self._proxy = client, proxy
+            client = self._client
+            self._active[client] = self._active.get(client, 0) + 1
+        try:
+            if retired is not None:
+                retired.close()
+            return translate(texts, target, source, api_key, proxy, provider, client=client)
+        finally:
+            with self._lock:
+                self._active[client] -= 1
+                if self._active[client] == 0:
+                    del self._active[client]
+                    should_close = client is not self._client
+                else:
+                    should_close = False
+            if should_close:
+                client.close()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            client, self._client = self._client, None
+            should_close = client is not None and client not in self._active
+        if should_close:
+            client.close()
 
 
 def _check_response(response: httpx.Response, provider: str) -> Any:
@@ -178,14 +258,7 @@ def translate(
         return TranslationResult(list(texts))
     active = [texts[index] for index in indices]
     try:
-        context = nullcontext(client) if client is not None else httpx.Client(
-            proxy=proxy or None,
-            timeout=httpx.Timeout(20.0, connect=8.0, pool=8.0),
-            limits=httpx.Limits(max_connections=3, max_keepalive_connections=3),
-            headers={"User-Agent": "ScreenshotTranslate/1.0", "Accept": "application/json"},
-            verify=True,
-            follow_redirects=False,
-        )
+        context = nullcontext(client) if client is not None else _new_client(proxy)
         with context as http:
             if provider == "official":
                 result = _official(http, active, target, source, api_key.strip())

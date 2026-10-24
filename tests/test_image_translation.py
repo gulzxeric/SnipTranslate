@@ -1,6 +1,9 @@
 from PySide6.QtGui import QImage, QColor
+import numpy as np
+import pytest
 from screen_translate.models import OcrResult, Rect, TextBlock
 from screen_translate.image_translation import paragraphs, render
+from screen_translate import image_translation
 
 
 def block(text, x, y, width=300, height=20):
@@ -39,3 +42,32 @@ def test_incomplete_translation_mapping_is_rejected():
     import pytest
     with pytest.raises(ValueError):
         render(image, paragraphs(ocr), [])
+
+
+@pytest.mark.parametrize('format', [QImage.Format.Format_RGB32, QImage.Format.Format_ARGB32,
+    QImage.Format.Format_RGB888, QImage.Format.Format_RGBA8888])
+def test_vector_color_sampling_preserves_pixel_colors_stride_alpha_and_edge_clipping(format):
+    pixels = np.random.default_rng(12).integers(0, 256, (61, 83, 4), dtype=np.uint8)
+    image = QImage(pixels.data, 83, 61, pixels.strides[0], QImage.Format.Format_RGBA8888).convertToFormat(format)
+    owner, view = image_translation._rgb_view(image)
+    assert owner is not None
+    for region in [image_translation.Region([block('one', 3.5, 4.2, 62, 30), block('two', 8, 40, 60, 15)]),
+                   image_translation.Region([block('outside', -120, -110, 10, 10)]),
+                   image_translation.Region([block('edge', 75, 52, 35, 30)])]:
+        old = image_translation._colors(image, region)
+        new = image_translation._colors(image, region, view)
+        assert [c.getRgb() for c in old] == [c.getRgb() for c in new]
+
+
+def test_vector_sampling_produces_identical_rendered_image(monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(['tests', '-platform', 'offscreen'])
+    image = QImage(401, 160, QImage.Format.Format_ARGB32)
+    image.fill(QColor('#f8f8fa'))
+    for x in range(15, 290, 8):
+        for y in range(20, 42):
+            image.setPixelColor(x, y, QColor('#282d32'))
+    regions = paragraphs(OcrResult([block('Hello world', 12, 16, 300, 30)], 'en', 401, 160))
+    optimized = render(image, regions, ['你好，世界'])
+    monkeypatch.setattr(image_translation, '_rgb_view', lambda _: (None, None))
+    assert render(image, regions, ['你好，世界']) == optimized
