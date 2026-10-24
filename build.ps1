@@ -10,6 +10,10 @@ if ($LASTEXITCODE -ne 0) {
     throw 'PyInstaller missing. Run: .venv\Scripts\python.exe -m pip install pyinstaller'
 }
 & $taskPython -c "import comtypes.client; comtypes.client.GetModule('UIAutomationCore.dll')"
+& $taskPython -c 'from screen_translate.ocr import warmup_ocr; warmup_ocr()'
+if ($LASTEXITCODE -ne 0) {
+    throw 'OCR model preparation failed. Check the model download and runtime dependencies.'
+}
 $taskBuildArgs = @()
 if ($Clean) { $taskBuildArgs += '--clean' }
 & $taskPython -m PyInstaller @taskBuildArgs --noconfirm --windowed --onedir --name SnipTranslate --collect-submodules winrt --collect-data winrt --collect-submodules comtypes.gen --collect-data comtypes --collect-all rapidocr --collect-binaries onnxruntime --copy-metadata rapidocr --copy-metadata onnxruntime run.py

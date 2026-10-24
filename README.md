@@ -1,40 +1,48 @@
-# Snipaste 翻译助手
+# SnipTranslate · Snipaste 翻译助手
 
-保留 Snipaste 原来的操作：**F1 截图 → 框选 → 在原工具栏下方点击绿色“翻译” → 查看译文**。F3 贴图继续由 Snipaste 处理。
+**简体中文** · [English](README.en.md)
 
-这是一个外部伴随按钮，不修改 Snipaste.exe，不注入进程，不改变原快捷键和配置。已针对本机 Snipaste 2.11.3 x64 的工具栏结构适配；其他版本或工具栏布局变化需要重新验证。
+给 Snipaste 加一个翻译按钮：**F1 截图 → 框选 → 点击“翻译” → 在原位置查看译图**。F3 贴图继续由 Snipaste 处理。
 
-## 使用
+这是独立运行的伴随工具，当前适配 **Snipaste 2.11.3 x64**，界面为简体中文。
 
-双击 `dist\SnipTranslate\SnipTranslate.exe`，或在开发目录双击 `Start.cmd`。助手启动后只显示托盘图标，没有独立截图主界面。
+## 下载与使用
 
-1. 正常按 **F1**，用 Snipaste 框选文字。
-2. 原工具栏下方出现绿色 **翻译** 按钮，点击即可。
-3. 在截图原位置显示译文图片，保留原图布局，并将周围屏幕变暗。可切换原图／译图、复制、保存或贴图；“文字”可查看纯文本。
-4. 右键助手托盘图标可设置目标语言、代理、谷歌接口和 Snipaste 路径，也可退出助手。
+从 [Releases](https://github.com/gulzxeric/SnipTranslate/releases) 下载 **SnipTranslate-v0.1.0-windows-x64.zip**。需要 Windows 10/11 x64，无需安装 Python。
 
-按钮通过 Windows 无障碍接口定位真实工具栏，点击后调用 Snipaste 自己的复制按钮取得当前截图。没有注册新全局快捷键，也不会自动翻译其他剪贴板图片。截图完成或取消时按钮自动隐藏。
+1. 自行安装并启动 [Snipaste](https://www.snipaste.com/)。压缩包不包含 Snipaste。
+2. **完整解压**压缩包，保留 `SnipTranslate.exe` 和 `_internal` 文件夹。
+3. 双击 `SnipTranslate.exe`。首次使用若未找到 Snipaste，会提示选择已安装的 `Snipaste.exe`。
+4. 等待后台加载 OCR 模型，然后按 F1 框选文字，点击原工具栏下方的绿色“翻译”按钮。
+5. 可切换原图／译图、复制、保存、贴图，或点击“文字”查看纯文本。
 
-## 翻译与 OCR
+助手只显示托盘图标。右键托盘图标可打开设置、查看最近译图或退出。截图完成或取消时，翻译按钮自动隐藏。
 
-- **OCR 在本机运行**，默认使用 RapidOCR + ONNX Runtime 的中英混排模型，模型随程序附带，不上传截图。设置中也可以选择 Windows 系统 OCR；Windows 模式可选择已安装的识别语言，“系统识别语言”不等于自动检测语言。
-- **翻译使用谷歌在线接口**，识别出的文字会发送到谷歌。默认公共接口免 Key，但非官方保证的 API，可能变更或限流。
-- 多段文字会在长度限制内合并请求，减少网络往返；如谷歌改变换行、无法确认段落对应关系，会自动逐段翻译，保证译文位置。官方 Cloud 接口直接使用其批量参数。
-- 连续截图会复用谷歌的 HTTPS 连接，代理变化时自动替换连接。RapidOCR 接收内存中的无损位图，减少 PNG 压缩等待；图片排版通过批量像素采样减少等待，保留原有颜色选择和文字布局。
-- 也可在设置中选择 **Google Cloud Translation 官方 API**，需要启用服务、计费并提供 API Key。Key 通过 Windows DPAPI 加密存储；也支持 `GOOGLE_TRANSLATE_API_KEY` 环境变量。
-- 谷歌不可达时，可填写 HTTP / HTTPS 代理，例如 `http://127.0.0.1:7890`。
+### 开机启动
 
-设置和日志保存在 `%LOCALAPPDATA%\SnipTranslate`。截图不会自动保存到磁盘。
+按 Win+R，输入 `shell:startup`，将 `SnipTranslate.exe` 的**快捷方式**放入打开的文件夹。Snipaste 也需要设置为开机启动。之后不要移动程序文件夹。
 
-图片翻译按段落处理，并根据原图估计背景色、文字颜色和字号。适合网页、文档等平整背景；复杂图片背景、特殊字体或过长译文可能与原图有差异。无法取得原截图位置时，会居中显示结果。当前 Snipaste 版本的坐标通过只读日志辅助定位，不会改动原程序或日志。
+## 功能与数据处理
 
-启动时会在后台预热本地 OCR 模型。识别过程采用适合截图的缩放和 CPU 推理参数；翻译时分别显示识别、谷歌请求、排版进度，完成后显示从点击按钮到译图完成的总耗时（包含 Snipaste 取图）。鼠标停在耗时文字上可查看取图、准备、等待、识别、谷歌和排版的耗时，日志也记录数值及截图尺寸，方便定位瓶颈。单独 OCR 的基准耗时不等于整个翻译过程耗时，大图、文字多、首次加载或网络延迟都会影响结果。
+- **本地 OCR**：默认 RapidOCR + ONNX Runtime，中英混排模型随包附带。截图不上传到翻译服务；也可选择 Windows 系统 OCR。
+- **谷歌在线翻译**：只发送识别出的文字。默认公共接口免 Key，但并非官方承诺支持的 Cloud API，可能限流或变更。
+- **官方 Cloud API**：可切换 Google Cloud Translation，需自行启用服务、计费并提供 API Key。Key 通过 Windows DPAPI 加密保存，也支持 `GOOGLE_TRANSLATE_API_KEY` 环境变量。
+- **代理**：无法连接谷歌时，可填写 HTTP / HTTPS 代理，例如 `http://127.0.0.1:7890`。
+- **图片排版**：按段落翻译，估计背景、文字颜色和字号，在原位置显示译图，适合网页、文档等平整背景。
 
-可用 `tools/benchmark_translation.py 图片路径` 复测本机流水线耗时，或用 `tools/benchmark_ocr_options.py 图片路径` 比较 OCR 参数。
+设置和日志位于 `%LOCALAPPDATA%\SnipTranslate`。普通使用不会自动将截图保存到磁盘。
 
-## 开发
+## 速度与限制
 
-Windows 10/11、64 位 Python 3.11 或更新版本：
+启动时后台预热 OCR；连续截图复用 HTTPS 连接，多段文字合并请求，并减少图片压缩和排版等待。
+
+完成后的耗时从**点击翻译按钮**开始，包含取图、准备、识别、网络和排版。鼠标悬停可查看分段耗时，日志记录截图尺寸和数值。小图的 OCR 基准不等于整个过程耗时；大图、文字多、首次加载及网络都会影响速度。
+
+当前只在本机 Snipaste 2.11.3 x64 上验证。其他版本、工具栏布局或权限不同，需要另行测试。复杂背景、特殊字体、旋转文字及过长译文可能排版不理想。无法从当前截图日志取得位置时，译图居中显示。Windows OCR 需要对应的系统语言组件，并需在目标机器实际验证。
+
+## 开发与打包
+
+Windows x64、Python 3.11 或更新版本（当前开发环境为 Python 3.13）：
 
 ```powershell
 py -3 -m venv .venv
@@ -42,22 +50,27 @@ py -3 -m venv .venv
 .venv\Scripts\python.exe run.py
 ```
 
+也可运行 `Start.cmd`。测试、构建和生成发布包：
+
 ```powershell
 .venv\Scripts\python.exe -m pip install pytest pyinstaller
 .venv\Scripts\python.exe -m pytest -q
 .\build.ps1
+.venv\Scripts\python.exe tools\package_release.py
 ```
 
-打包后保留整个 `dist\SnipTranslate` 文件夹，不能只移动 EXE。微软对桌面 Windows.Media.Ocr 的正式支持范围要求包标识；当前便携实现已在本机 Python 环境实测通过，其他机器需要实际验证及对应 OCR 语言组件。
+构建会下载默认 OCR 模型。发布包、SHA-256 校验文件和第三方许可说明输出到 `dist\releases`。必须分发整个程序目录。
 
-只读诊断（截图选区处于打开状态时运行）：
+性能测试：`tools\benchmark_translation.py 图片路径`。截图选区打开时可运行只读诊断：
 
 ```powershell
 .venv\Scripts\python.exe -m screen_translate.snipaste_native --diagnose --accessibility
 ```
 
-## 参考
+## 反馈与第三方组件
 
-- [Snipaste 官方命令行接口](https://docs.snipaste.com/zh-cn/command-line-options)
-- [Google Cloud Translation](https://cloud.google.com/translate/docs/basic/translating-text)
-- [Windows OCR](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr)
+请在 [Issues](https://github.com/gulzxeric/SnipTranslate/issues) 中提供 Windows / Snipaste 版本、截图尺寸、耗时和错误信息，分享截图前请移除敏感内容。
+
+发布包附带第三方组件许可、版本和来源说明。SnipTranslate 是独立项目，与 Snipaste 及 Google 无隶属关系。
+
+[Snipaste 命令行文档](https://docs.snipaste.com/zh-cn/command-line-options) · [RapidOCR](https://github.com/RapidAI/RapidOCR) · [Google Cloud Translation](https://cloud.google.com/translate/docs/basic/translating-text) · [Windows OCR](https://learn.microsoft.com/en-us/uwp/api/windows.media.ocr)

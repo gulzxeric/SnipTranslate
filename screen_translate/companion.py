@@ -15,7 +15,7 @@ from time import perf_counter
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
-from PySide6.QtWidgets import QApplication, QDialog, QMenu, QMessageBox, QSystemTrayIcon
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMenu, QMessageBox, QSystemTrayIcon
 
 from .dialogs import SettingsDialog, language_combo
 from .google_translate import TranslationService, translate
@@ -396,6 +396,27 @@ def clipboard_sequence() -> int:
     return ctypes.windll.user32.GetClipboardSequenceNumber()
 
 
+def prepare_preferences(preferences: Settings) -> Settings | None:
+    """Let a portable download locate Snipaste before creating the companion."""
+    from .integration import _executable, IntegrationError
+    try:
+        _executable(preferences.snipaste_path)
+        return preferences
+    except IntegrationError:
+        path, _ = QFileDialog.getOpenFileName(
+            None, '首次使用：选择已安装的 Snipaste.exe', '', 'Snipaste (Snipaste.exe)')
+        if not path:
+            return None
+        try:
+            executable = _executable(path)
+            selected = replace(preferences, snipaste_path=str(executable))
+            selected.save()
+            return selected
+        except (IntegrationError, OSError, RuntimeError) as exc:
+            QMessageBox.warning(None, '无法配置 Snipaste', str(exc))
+            return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Snipaste 翻译助手：在原截图工具栏旁显示一个翻译按钮")
     parser.add_argument("--smoke-test", action="store_true", help=argparse.SUPPRESS)
@@ -457,7 +478,10 @@ def main() -> int:
     if not args.smoke_test:
         QLocalServer.removeServer("SnipasteTranslate.Companion.v1")
         server.listen("SnipasteTranslate.Companion.v1")
-    companion = Companion(application, Settings.load())
+    preferences = prepare_preferences(Settings.load())
+    if preferences is None:
+        return 0
+    companion = Companion(application, preferences)
     if args.smoke_test:
         companion.timer.stop()
         QTimer.singleShot(350, companion.quit)
